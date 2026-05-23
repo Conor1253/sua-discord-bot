@@ -217,7 +217,7 @@ async def auto_message_loop():
                 add_to_history("sua", "이수아", message)
 
                 # 전송
-                await channel.send(message)
+                await channel.send(message, tts=True)
                 print(f"[자동] {message}")
 
         except Exception as e:
