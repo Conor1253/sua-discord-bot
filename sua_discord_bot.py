@@ -132,6 +132,10 @@ def ask_gemini(user_message, is_auto=False):
         })
 
         result = response.json()
+        print(f"[Gemini 응답] {result}")
+        if "candidates" not result:
+            print(f"[Gemini 에러] {result}")
+            return "...지금 머리가 안 돌아가. 나중에 다시 말해."
         reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         # 마크다운 서식 제거 (이수아는 채팅체로 말해야 하니까)
