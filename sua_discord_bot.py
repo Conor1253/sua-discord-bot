@@ -6,6 +6,7 @@
 #  1. 실시간 대화 (메시지 보내면 이수아가 대답)
 #  2. 2시간마다 자동으로 말 걸기
 #  3. 대화 기억 (최근 20개 메시지 기억)
+#  4. Gemini 실패 시 자동 재시도 + 폴백 대사
 #
 #  Railway에 올려서 24시간 무료로 실행합니다.
 # ============================================================
@@ -25,12 +26,11 @@ from datetime import datetime
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "여기에_디스코드_봇_토큰")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "여기에_제미나이_API키")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))  # 수아가 말할 채널 ID
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))
 
 
 # ─────────────────────────────────────────────
 #  이수아의 성격 설정 (시스템 프롬프트)
-#  이 부분을 수정하면 성격이 바뀝니다.
 # ─────────────────────────────────────────────
 
 SUA_PERSONA = """너는 '이수아'라는 20세 여성 캐릭터야.
@@ -52,8 +52,47 @@ SUA_PERSONA = """너는 '이수아'라는 20세 여성 캐릭터야.
 
 
 # ─────────────────────────────────────────────
+#  Gemini 실패 시 사용할 폴백 대사들
+#  이 대사들은 Gemini가 안 될 때 랜덤으로 선택됩니다.
+#  대화가 끊기지 않고 자연스럽게 이어집니다.
+# ─────────────────────────────────────────────
+
+# 일반 대화용 폴백 (사용자가 말했을 때)
+FALLBACK_REPLIES = [
+    "뭐? 잘 안 들렸어. 다시 말해봐.",
+    "아 지금 좀 멍하다. 뭐라고?",
+    "으으... 지금 머리가 안 돌아가. 다시.",
+    "잠깐만, 딴생각 했어. 뭐?",
+    "하... 알겠는데 뭐라 답해야 할지 모르겠어.",
+    "그래서? 결론이 뭔데.",
+    "아 몰라 몰라. 나중에 말해.",
+    "지금 기분이 좀 그래. 잠깐만.",
+    "듣고는 있어. 근데 대답하기 귀찮아.",
+    "...그래.",
+    "흥, 그래서 어쩌라고.",
+    "나한테 왜 그런 걸 말하는 건데.",
+    "아 진짜? 흥미 없는데.",
+    "잠깐, 생각 좀 하자. 방해하지 마.",
+    "너 지금 나 무시한 거야? 아니면 내가 무시하는 거야?",
+]
+
+# 자동 메시지용 폴백 (2시간마다 자동으로 보낼 때)
+FALLBACK_AUTO = [
+    "아무도 없나? ...별로 궁금하지도 않지만.",
+    "심심해. 아 아니, 심심한 거 아니야.",
+    "오늘도 조용하네. 좋아, 난 조용한 게 좋아.",
+    "혹시 죽은 건 아니지? 확인하는 거야, 걱정 아니라.",
+    "나 여기 있거든? 아무도 안 궁금하겠지만.",
+    "밥은 먹었어? ...그냥 물어본 거야.",
+    "뭐 하고 있어. 궁금해서 묻는 거 아니라 그냥.",
+    "하... 할 게 없다. 너 때문은 아닌데.",
+    "아까부터 계속 여기 앉아 있는데. 너도 한심하지만 나도 한심해.",
+    "잠이 안 와. 아 아니, 너한테 말한 거 아니야.",
+]
+
+
+# ─────────────────────────────────────────────
 #  대화 기억 시스템
-#  최근 20개 메시지를 기억합니다.
 # ─────────────────────────────────────────────
 
 conversation_history = []
@@ -61,23 +100,19 @@ MAX_HISTORY = 20
 
 
 def add_to_history(role, name, message):
-    """대화 기록에 메시지를 추가합니다."""
     conversation_history.append({
         "role": role,
         "name": name,
         "message": message,
         "time": datetime.now().strftime("%H:%M")
     })
-    # 최대 개수를 넘으면 오래된 것부터 삭제
     if len(conversation_history) > MAX_HISTORY:
         conversation_history.pop(0)
 
 
 def get_history_text():
-    """대화 기록을 텍스트로 변환합니다."""
     if not conversation_history:
         return "(이전 대화 없음)"
-
     lines = []
     for msg in conversation_history:
         lines.append(f"[{msg['time']}] {msg['name']}: {msg['message']}")
@@ -85,35 +120,27 @@ def get_history_text():
 
 
 # ─────────────────────────────────────────────
-#  Gemini API 호출
+#  Gemini API 호출 (재시도 + 폴백 포함)
 # ─────────────────────────────────────────────
 
 def ask_gemini(user_message, is_auto=False):
-    """
-    Gemini에게 이수아의 성격으로 답변을 요청합니다.
-
-    is_auto=True이면 2시간마다 자동으로 보내는 메시지를 생성합니다.
-    """
     history_text = get_history_text()
 
     if is_auto:
-        # 자동 메시지: 랜덤 주제로 말 걸기
         now = datetime.now()
-        hour = now.hour
         prompt = f"""{SUA_PERSONA}
 
 [현재 상황]
 지금은 {now.strftime('%Y년 %m월 %d일 %H시 %M분')}이야.
-너는 디스코드 채팅방에 있어. 2시간마다 한 번씩 자연스럽게 말을 걸어야 해.
-아무 말이나 자연스럽게 해. 심심한 척, 귀찮은 척, 잔소리, 도발, 혼잣말 등 자유롭게.
+너는 디스코드 채팅방에 있어. 자연스럽게 말을 걸어.
+심심한 척, 귀찮은 척, 잔소리, 도발, 혼잣말 등 자유롭게.
 
 [최근 대화 기록]
 {history_text}
 
 [지시]
-채팅방에 자연스럽게 한마디 해. 1~2문장으로 짧게."""
+채팅방에 자연스럽게 한마디 해. 1~2문장으로 짧게. 따옴표 없이 메시지만 출력해."""
     else:
-        # 일반 대화: 사용자 메시지에 답변
         prompt = f"""{SUA_PERSONA}
 
 [최근 대화 기록]
@@ -123,29 +150,83 @@ def ask_gemini(user_message, is_auto=False):
 사용자: {user_message}
 
 [지시]
-위 메시지에 이수아의 성격으로 대답해. 1~4문장으로 짧게 채팅하듯이."""
+위 메시지에 이수아의 성격으로 대답해. 1~4문장으로 짧게 채팅하듯이. 따옴표 없이 메시지만 출력해."""
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        response = requests.post(url, json={
-            "contents": [{"parts": [{"text": prompt}]}]
-        })
+    # 최대 2번 시도
+    for attempt in range(2):
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+            response = requests.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                ]
+            }, timeout=10)
 
-        result = response.json()
-        print(f"[Gemini 응답] {result}")
-        if "candidates" not result:
-            print(f"[Gemini 에러] {result}")
-            return "...지금 머리가 안 돌아가. 나중에 다시 말해."
-        reply = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            result = response.json()
 
-        # 마크다운 서식 제거 (이수아는 채팅체로 말해야 하니까)
-        reply = reply.replace("**", "").replace("*", "").replace("#", "")
+            # 응답 구조 확인
+            if "candidates" not in result:
+                print(f"[Gemini 에러 시도{attempt+1}] 응답에 candidates 없음: {result}")
+                if attempt == 0:
+                    continue  # 한번 더 시도
+                else:
+                    break  # 폴백으로
 
-        return reply
+            candidate = result["candidates"][0]
 
-    except Exception as e:
-        print(f"[오류] Gemini API 호출 실패: {e}")
-        return "...귀찮아. 나중에 말해."
+            # finishReason 확인 (SAFETY 등으로 차단된 경우)
+            finish_reason = candidate.get("finishReason", "STOP")
+            if finish_reason != "STOP":
+                print(f"[Gemini 경고] finishReason={finish_reason}")
+
+            # 텍스트 추출
+            if "content" not in candidate:
+                print(f"[Gemini 에러 시도{attempt+1}] content 없음: {candidate}")
+                if attempt == 0:
+                    continue
+                else:
+                    break
+
+            reply = candidate["content"]["parts"][0]["text"].strip()
+            reply = reply.replace("**", "").replace("*", "").replace("#", "")
+
+            # 빈 응답 체크
+            if not reply:
+                print(f"[Gemini 경고] 빈 응답")
+                if attempt == 0:
+                    continue
+                else:
+                    break
+
+            print(f"[Gemini 성공] {reply[:50]}...")
+            return reply
+
+        except requests.exceptions.Timeout:
+            print(f"[Gemini 타임아웃 시도{attempt+1}]")
+            if attempt == 0:
+                continue
+            else:
+                break
+
+        except Exception as e:
+            print(f"[Gemini 오류 시도{attempt+1}] {type(e).__name__}: {e}")
+            if attempt == 0:
+                continue
+            else:
+                break
+
+    # 모든 시도 실패 시 폴백 대사 사용
+    if is_auto:
+        fallback = random.choice(FALLBACK_AUTO)
+    else:
+        fallback = random.choice(FALLBACK_REPLIES)
+
+    print(f"[폴백 사용] {fallback}")
+    return fallback
 
 
 # ─────────────────────────────────────────────
@@ -153,48 +234,33 @@ def ask_gemini(user_message, is_auto=False):
 # ─────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.message_content = True  # 메시지 내용을 읽을 수 있게
+intents.message_content = True
 client = discord.Client(intents=intents)
 
 
 @client.event
 async def on_ready():
-    """봇이 디스코드에 접속했을 때 실행됩니다."""
     print(f"[시작] {client.user.name} 접속 완료!")
     print(f"[채널] 자동 메시지 채널 ID: {CHANNEL_ID}")
-    print(f"[간격] 2시간마다 자동 메시지 전송")
+    print(f"[Gemini] API 키 {'설정됨' if GEMINI_API_KEY != '여기에_제미나이_API키' else '미설정!'}")
     print()
-
-    # 2시간마다 자동 메시지 보내는 작업 시작
     client.loop.create_task(auto_message_loop())
 
 
 @client.event
 async def on_message(message):
-    """누군가 메시지를 보냈을 때 실행됩니다."""
-
-    # 자기 자신의 메시지에는 반응하지 않음
     if message.author == client.user:
         return
 
-    # 봇이 멘션되었거나, 봇이 있는 채널의 메시지일 때 반응
-    # (특정 채널에서만 반응하게 하려면 아래 조건 수정)
     bot_mentioned = client.user.mentioned_in(message)
     is_target_channel = (message.channel.id == CHANNEL_ID)
 
     if bot_mentioned or is_target_channel:
-        # 타이핑 표시 (수아가 답장 쓰는 중...)
         async with message.channel.typing():
-            # 사용자 메시지를 기록에 추가
             add_to_history("user", message.author.display_name, message.content)
-
-            # Gemini에게 답변 요청
             reply = ask_gemini(message.content)
-
-            # 수아의 답변을 기록에 추가
             add_to_history("sua", "이수아", reply)
 
-        # 답변 전송
         await message.channel.send(reply, tts=True)
 
         print(f"[대화] {message.author.display_name}: {message.content}")
@@ -207,27 +273,19 @@ async def on_message(message):
 # ─────────────────────────────────────────────
 
 async def auto_message_loop():
-    """2시간마다 자동으로 채팅방에 메시지를 보냅니다."""
     await client.wait_until_ready()
 
     while not client.closed:
         try:
             channel = client.get_channel(CHANNEL_ID)
             if channel:
-                # Gemini에게 자동 메시지 생성 요청
                 message = ask_gemini("", is_auto=True)
-
-                # 기록에 추가
                 add_to_history("sua", "이수아", message)
-
-                # 전송
                 await channel.send(message, tts=True)
                 print(f"[자동] {message}")
-
         except Exception as e:
-            print(f"[오류] 자동 메시지 실패: {e}")
+            print(f"[자동 오류] {e}")
 
-        # 2시간(7200초) 대기
         await asyncio.sleep(7200)
 
 
