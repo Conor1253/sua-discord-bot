@@ -191,7 +191,7 @@ async def on_message(message):
             add_to_history("sua", "이수아", reply)
 
         # 답변 전송
-        await message.channel.send(reply)
+        await message.channel.send(reply, tts=True)
 
         print(f"[대화] {message.author.display_name}: {message.content}")
         print(f"[수아] {reply}")
